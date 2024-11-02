@@ -1,16 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <windows.h>
-
-// Función para calcular el tiempo en milisegundos
-double getCurrentTime() {
-    FILETIME fileTime;
-    ULARGE_INTEGER time;
-    GetSystemTimeAsFileTime(&fileTime);
-    time.LowPart = fileTime.dwLowDateTime;
-    time.HighPart = fileTime.dwHighDateTime;
-    return (double)time.QuadPart / 10000.0;
-}
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/time.h>
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -18,42 +10,41 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Medir el tiempo de inicio
-    double start = getCurrentTime();
+    struct timeval start, end;
+    pid_t pid;
 
-    // Crear un proceso hijo para ejecutar el comando
-    STARTUPINFO si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
+    // Obtener tiempo inicial
+    gettimeofday(&start, NULL);
 
-    // Construir el comando completo
-    char command[1024] = "";
-    for (int i = 1; i < argc; i++) {
-        strcat(command, argv[i]);
-        strcat(command, " ");
-    }
+    // Crear proceso hijo
+    pid = fork();
 
-    // Crear el proceso hijo
-    if (!CreateProcess(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        fprintf(stderr, "Error al crear el proceso: %lu\n", GetLastError());
+    if (pid < 0) {
+        // Error en fork
+        fprintf(stderr, "Error en fork()\n");
         return EXIT_FAILURE;
+    } 
+    else if (pid == 0) {
+        // Proceso hijo
+        execvp(argv[1], &argv[1]);
+        // Si llegamos aquí, hubo error en exec
+        fprintf(stderr, "Error al ejecutar %s\n", argv[1]);
+        exit(EXIT_FAILURE);
+    } 
+    else {
+        // Proceso padre
+        int status;
+        wait(&status);
+        
+        // Obtener tiempo final
+        gettimeofday(&end, NULL);
+
+        // Calcular tiempo transcurrido en segundos
+        double elapsed = (end.tv_sec - start.tv_sec) + 
+                        (end.tv_usec - start.tv_usec) / 1000000.0;
+
+        printf("Tiempo transcurrido: %.5f segundos\n", elapsed);
     }
-
-    // Esperar a que el proceso hijo termine
-    WaitForSingleObject(pi.hProcess, INFINITE);
-
-    // Medir el tiempo de fin
-    double end = getCurrentTime();
-
-    // Calcular el tiempo transcurrido
-    double elapsed = (end - start) / 1000.0; // Convertir a segundos
-    printf("Elapsed time: %.5f seconds\n", elapsed);
-
-    // Cerrar los handles
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
 
     return EXIT_SUCCESS;
 }
