@@ -1,0 +1,14 @@
+LICENSE
+README.md
+ejercicios_refuerzo
+enunciado
+s29.pdf
+s30.pdf
+salida.txt
+tester
+time
+time.c
+time.exe
+wish
+wish.c
+wish.exe
