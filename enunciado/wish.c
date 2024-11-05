@@ -4,230 +4,284 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <errno.h>
 
 #define BUFFER_SIZE 1024
 #define MAX_ARGS 64
+#define MAX_PATHS 64
+
+// Mensaje de error estándar
+char error_message[30] = "An error has occurred\n";
 
 // Ruta de búsqueda inicial
-char *path[] = {"/bin", NULL};
+char *path[MAX_PATHS];
 
-// Función para ejecutar comandos integrados
+// Declaración de funciones
+void print_error();
 int execute_builtin(char **args);
-
-// Función para ejecutar comandos externos
-void execute_command(char **args, int background);
-
-// Función para manejar la redirección de entrada y salida
+void execute_command(char **args);
 int handle_redirection(char **args);
+void handle_parallel_commands(char *input);
+char *preprocess_input(char *input);
 
-// Función para manejar pipes
-int handle_pipes(char **args);
+// Variable global para indicar modo batch
+int batch_mode = 0;
 
-int main() {
+// Función para mostrar error
+void print_error() {
+    write(STDERR_FILENO, error_message, strlen(error_message));
+}
+
+// Función principal
+int main(int argc, char *argv[]) {
     char input[BUFFER_SIZE];
-    char *args[MAX_ARGS];
-    char *token;
-    int is_running = 1;
+    FILE *input_stream = stdin;
 
-    while (is_running) {
-        printf("wish> ");
-        if (fgets(input, BUFFER_SIZE, stdin) == NULL) {
-            break;  // Salir en caso de error o EOF
+    // Inicializar path[]
+    path[0] = strdup("/bin");
+    path[1] = NULL;
+
+    // Verificar argumentos de entrada para modo batch
+    if (argc == 2) {
+        input_stream = fopen(argv[1], "r");
+        if (!input_stream) {
+            print_error();
+            exit(1);
+        }
+        batch_mode = 1; // Estamos en modo batch
+    } else if (argc > 2) {
+        print_error();
+        exit(1);
+    }
+
+    while (1) {
+        // Imprimir el prompt solo en modo interactivo
+        if (!batch_mode) {
+            printf("wish> ");
         }
 
-        // Eliminar el salto de línea al final de input
-        input[strcspn(input, "\n")] = 0;
-
-        // Dividir el comando en argumentos
-        int i = 0;
-        token = strtok(input, " ");
-        while (token != NULL && i < MAX_ARGS - 1) {
-            args[i++] = token;
-            token = strtok(NULL, " ");
+        // Leer entrada
+        if (fgets(input, BUFFER_SIZE, input_stream) == NULL) {
+            break;
         }
-        args[i] = NULL;
 
-        // Verificar si el comando es un comando integrado
-        if (args[0] != NULL) {
-            if (strcmp(args[0], "exit") == 0) {
-                is_running = 0;
-            } else if (execute_builtin(args) == 0) {
-                continue;
-            } else {
-                int background = 0;
-                // Verificar si el último argumento es '&'
-                if (i > 0 && strcmp(args[i - 1], "&") == 0) {
-                    background = 1;
-                    args[i - 1] = NULL;
-                }
-                // Manejar pipes si es necesario
-                if (!handle_pipes(args)) {
-                    // Ejecutar un comando externo
-                    execute_command(args, background);
-                }
-            }
+        // Eliminar salto de línea y retorno de carro
+        input[strcspn(input, "\n")] = '\0';
+        size_t len = strlen(input);
+        if (len > 0 && input[len - 1] == '\r') {
+            input[len - 1] = '\0';
         }
+
+        // Manejar comandos paralelos
+        handle_parallel_commands(input);
+    }
+
+    if (input_stream != stdin) {
+        fclose(input_stream);
+    }
+
+    // Liberar memoria de path[]
+    for (int i = 0; path[i] != NULL; i++) {
+        free(path[i]);
     }
 
     return 0;
 }
 
+// Función para reemplazar '&' por ' & '
+char *preprocess_input(char *input) {
+    size_t len = strlen(input);
+    char *modified_input = malloc(len * 3 + 1); // Tamaño máximo posible
+    if (modified_input == NULL) {
+        print_error();
+        exit(1);
+    }
+    int idx = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (input[i] == '&') {
+            modified_input[idx++] = ' ';
+            modified_input[idx++] = '&';
+            modified_input[idx++] = ' ';
+        } else {
+            modified_input[idx++] = input[i];
+        }
+    }
+    modified_input[idx] = '\0';
+    return modified_input;
+}
+
+void handle_parallel_commands(char *input) {
+    char *commands[MAX_ARGS];
+    int num_commands = 0;
+
+    // Preprocesar la entrada
+    char *modified_input = preprocess_input(input);
+
+    // Dividir la entrada en comandos separados por '&'
+    char *token = strtok(modified_input, "&");
+    while (token != NULL && num_commands < MAX_ARGS - 1) {
+        // Eliminar espacios iniciales y finales
+        while (*token == ' ' || *token == '\t') token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t')) *end-- = '\0';
+
+        if (*token != '\0') {
+            commands[num_commands++] = token;
+        }
+        token = strtok(NULL, "&");
+    }
+    commands[num_commands] = NULL;
+
+    pid_t pids[MAX_ARGS];
+    int pid_index = 0;
+
+    // Ejecutar cada comando
+    for (int i = 0; i < num_commands; i++) {
+        char *args[MAX_ARGS];
+        int j = 0;
+
+        // Tokenizar argumentos, manejando espacios variables
+        token = strtok(commands[i], " \t");
+        while (token != NULL && j < MAX_ARGS - 1) {
+            args[j++] = token;
+            token = strtok(NULL, " \t");
+        }
+        args[j] = NULL;
+
+        // Verificar si hay un comando
+        if (args[0] != NULL) {
+            // Comandos internos
+            if (strcmp(args[0], "exit") == 0) {
+                if (args[1] != NULL) {
+                    print_error();
+                    continue;
+                }
+                // Liberar memoria antes de salir
+                for (int k = 0; path[k] != NULL; k++) {
+                    free(path[k]);
+                }
+                free(modified_input);
+                exit(0);
+            } else if (strcmp(args[0], "cd") == 0 || strcmp(args[0], "path") == 0) {
+                int result = execute_builtin(args);
+                if (result == -1) {
+                    print_error();
+                }
+                continue;
+            }
+
+            // Comandos externos
+            pid_t pid = fork();
+            if (pid < 0) {
+                print_error();
+            } else if (pid == 0) {
+                // Proceso hijo
+                execute_command(args);
+                exit(0); // Salir después de ejecutar el comando
+            } else {
+                // Proceso padre
+                pids[pid_index++] = pid;
+            }
+        }
+    }
+
+    // Esperar a que terminen todos los procesos hijos
+    for (int i = 0; i < pid_index; i++) {
+        waitpid(pids[i], NULL, 0);
+    }
+
+    free(modified_input);
+}
+
 // Función para ejecutar comandos integrados
 int execute_builtin(char **args) {
     if (strcmp(args[0], "cd") == 0) {
-        if (args[1] == NULL) {
-            // Cambio al directorio HOME si no hay argumentos
-            char *home = getenv("HOME");
-            if (home == NULL) {
-                fprintf(stderr, "An error has occurred\n");
-                return 1;
-            }
-            if (chdir(home) != 0) {
-                perror("chdir failed");
-                return 1;
-            }
-        } else if (args[2] != NULL) {
-            // Error si hay más de un argumento
-            fprintf(stderr, "An error has occurred\n");
-            return 1;
-        } else if (chdir(args[1]) != 0) {
-            // Error si el directorio no es accesible
-            perror("chdir failed");
-            return 1;
+        if (args[1] == NULL || args[2] != NULL) {
+            return -1;
+        }
+        if (chdir(args[1]) != 0) {
+            return -1;
         }
         return 0;
     } else if (strcmp(args[0], "path") == 0) {
+        // Liberar path existente
         for (int i = 0; path[i] != NULL; i++) {
             free(path[i]);
+            path[i] = NULL;
         }
-        int j = 0;
-        while (args[++j] != NULL && j < MAX_ARGS) {
-            path[j - 1] = strdup(args[j]);
+        // Construir nuevo path
+        int index = 0;
+        for (int i = 1; args[i] != NULL && index < MAX_PATHS - 1; i++) {
+            path[index++] = strdup(args[i]);
         }
-        path[j - 1] = NULL;
+        path[index] = NULL;
         return 0;
     }
     return -1;
 }
 
 // Función para ejecutar comandos externos
-void execute_command(char **args, int background) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork failed");
-    } else if (pid == 0) {
-        // Redirección de entrada/salida
-        if (handle_redirection(args) == -1) {
-            fprintf(stderr, "Redirection error\n");
+void execute_command(char **args) {
+    if (handle_redirection(args) == -1) {
+        print_error();
+        exit(1);
+    }
+
+    if (path[0] == NULL) {
+        // Si el path está vacío, no se pueden ejecutar comandos externos
+        print_error();
+        exit(1);
+    }
+
+    for (int i = 0; path[i] != NULL; i++) {
+        char command_path[BUFFER_SIZE];
+        snprintf(command_path, sizeof(command_path), "%s/%s", path[i], args[0]);
+        if (access(command_path, X_OK) == 0) {
+            execv(command_path, args);
+            // Si execv falla, imprimimos un error y salimos
+            print_error();
             exit(1);
         }
-
-        // Buscar el ejecutable en cada directorio del path
-        for (int i = 0; path[i] != NULL; i++) {
-            char command_path[BUFFER_SIZE];
-            snprintf(command_path, sizeof(command_path), "%s/%s", path[i], args[0]);
-            if (access(command_path, X_OK) == 0) {
-                execv(command_path, args);
-                perror("execv failed");
-                exit(1);
-            }
-        }
-        fprintf(stderr, "Command not found: %s\n", args[0]);
-        exit(1);
-    } else {
-        if (!background) {
-            waitpid(pid, NULL, 0); // Esperar si no es en segundo plano
-        }
     }
+    // Si llegamos aquí, el comando no se encontró en ningún directorio del path
+    print_error();
+    exit(1);
 }
 
-// Función para manejar la redirección de entrada y salida
+// Función para manejar redirección de salida
 int handle_redirection(char **args) {
-    for (int i = 0; args[i] != NULL; i++) {
+    int i = 0;
+    int redirect_index = -1;
+    int redirect_count = 0;
+
+    // Verificar la presencia y validez de la redirección
+    while (args[i] != NULL) {
         if (strcmp(args[i], ">") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "An error has occurred\n");
+            redirect_count++;
+            if (redirect_count > 1 || args[i + 1] == NULL || args[i + 2] != NULL) {
                 return -1;
             }
-            int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) {
-                perror("open failed");
-                return -1;
-            }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
-            args[i] = NULL;
-        } else if (strcmp(args[i], "<") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "An error has occurred\n");
-                return -1;
-            }
-            int fd = open(args[i + 1], O_RDONLY);
-            if (fd < 0) {
-                perror("open failed");
-                return -1;
-            }
-            dup2(fd, STDIN_FILENO);
-            close(fd);
-            args[i] = NULL;
+            redirect_index = i;
         }
+        i++;
+    }
+
+    // Si hay redirección, manejarla
+    if (redirect_index != -1) {
+        if (redirect_index == 0) {
+            // No hay comando antes de '>'
+            return -1;
+        }
+
+        int fd = open(args[redirect_index + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            return -1;
+        }
+        if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) {
+            close(fd);
+            return -1;
+        }
+        close(fd);
+        args[redirect_index] = NULL;
     }
     return 0;
 }
-
-// Función para manejar pipes
-int handle_pipes(char **args) {
-    int pipe_index = -1;
-    for (int i = 0; args[i] != NULL; i++) {
-        if (strcmp(args[i], "|") == 0) {
-            pipe_index = i;
-            break;
-        }
-    }
-
-    if (pipe_index == -1) {
-        return 0; // No hay pipes
-    }
-
-    args[pipe_index] = NULL;
-
-    int pipe_fd[2];
-    if (pipe(pipe_fd) == -1) {
-        perror("pipe failed");
-        return -1;
-    }
-
-    pid_t pid1 = fork();
-    if (pid1 < 0) {
-        perror("fork failed");
-        return -1;
-    } else if (pid1 == 0) {
-        dup2(pipe_fd[1], STDOUT_FILENO);
-        close(pipe_fd[0]);
-        close(pipe_fd[1]);
-        execvp(args[0], args);
-        perror("execvp failed");
-        exit(1);
-    }
-
-    pid_t pid2 = fork();
-    if (pid2 < 0) {
-        perror("fork failed");
-        return -1;
-    } else if (pid2 == 0) {
-        dup2(pipe_fd[0], STDIN_FILENO);
-        close(pipe_fd[1]);
-        close(pipe_fd[0]);
-        execvp(args[pipe_index + 1], &args[pipe_index + 1]);
-        perror("execvp failed");
-        exit(1);
-    }
-
-    close(pipe_fd[0]);
-    close(pipe_fd[1]);
-    waitpid(pid1, NULL, 0);
-    waitpid(pid2, NULL, 0);
-    return 1;
-}
-

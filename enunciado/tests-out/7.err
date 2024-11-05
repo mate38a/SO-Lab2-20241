@@ -1,2 +1,2 @@
-free(): invalid pointer
-../tester/run-tests.sh: line 23: 130826 Aborted                 (core dumped) ./wish tests/7.in
+An error has occurred
+An error has occurred
